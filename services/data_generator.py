@@ -6,9 +6,16 @@ from typing import List
 import numpy as np
 
 from models import PortfolioItem, Alert, DMADataPoint, IVDataPoint, OptionType, Priority
+from services.market_data import get_stock_price
 
 def generate_mock_positions(count: int = 10) -> List[PortfolioItem]:
-    """Generate mock portfolio positions."""
+    """Generate mock portfolio positions, using real stock prices when available."""
+    # Try to fetch real stock prices first
+    real_positions = generate_real_positions()
+    if real_positions:
+        return real_positions
+    
+    # Fallback to original mock generation if real data fails
     positions = []
     
     symbols = ["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", "NVDA", "META", "NFLX", "AMD", "INTC"]
@@ -52,6 +59,86 @@ def generate_mock_positions(count: int = 10) -> List[PortfolioItem]:
         positions.append(position)
     
     return positions
+
+
+def generate_real_positions() -> List[PortfolioItem]:
+    """Generate realistic positions using real stock prices from yfinance."""
+    try:
+        # Popular stocks to generate positions for
+        symbols = ["AAPL", "AMD", "NVDA", "TSLA", "HOOD"]
+        option_types = [OptionType.CALL, OptionType.PUT]
+        positions = []
+        
+        # Get real stock prices
+        real_prices = {}
+        for symbol in symbols:
+            price = get_stock_price(symbol)
+            if price is not None:
+                real_prices[symbol] = price
+        
+        # If we can't get any real prices, return empty list to fallback to mock
+        if not real_prices:
+            return []
+        
+        # Generate positions based on real prices
+        for i, (symbol, current_price) in enumerate(real_prices.items()):
+            for j in range(2):  # Generate 2 positions per stock
+                option_type = random.choice(option_types)
+                
+                # Set strike price near current stock price
+                strike_offset = random.uniform(-0.1, 0.1) * current_price
+                strike = round(current_price + strike_offset, 2)
+                
+                # Expiration in 1-6 months
+                expiration_days = random.randint(30, 180)
+                expiration = (datetime.now() + timedelta(days=expiration_days)).strftime("%Y-%m-%d")
+                
+                quantity = random.randint(1, 100)
+                
+                # Calculate realistic average price based on strike and current price
+                intrinsic_value = max(0, current_price - strike) if option_type == OptionType.CALL else max(0, strike - current_price)
+                time_value = random.uniform(0.5, 3.0) * (expiration_days / 30)  # More time = more value
+                avg_price = round(intrinsic_value + time_value, 2)
+                
+                # Market price with slight variation from average
+                market_price = round(avg_price * random.uniform(0.9, 1.1), 2)
+                pnl = round((market_price - avg_price) * quantity, 2)
+                
+                # Realistic implied volatility based on stock price (rough approximation)
+                iv = round(random.uniform(0.2, 0.6), 2)
+                
+                # Simplified greeks calculation
+                years_to_expiry = expiration_days / 365.0
+                delta = 0.5 + (0.4 * (current_price - strike) / current_price) if option_type == OptionType.CALL else 0.5 - (0.4 * (strike - current_price) / current_price)
+                delta = max(-1, min(1, delta))  # Clamp between -1 and 1
+                
+                gamma = round(min(0.1, 0.01 + 0.05 / (1 + years_to_expiry)), 4)
+                theta = round(-0.05 * years_to_expiry, 4)
+                vega = round(0.1 + 0.3 * years_to_expiry, 4)
+                
+                position = PortfolioItem(
+                    id=f"pos_{len(positions)+1}",
+                    symbol=symbol,
+                    type=option_type,
+                    strike=strike,
+                    expiration=expiration,
+                    quantity=quantity,
+                    avgPrice=avg_price,
+                    marketPrice=market_price,
+                    pnl=pnl,
+                    iv=iv,
+                    delta=round(delta, 2),
+                    gamma=gamma,
+                    theta=theta,
+                    vega=vega
+                )
+                positions.append(position)
+        
+        return positions
+    except Exception as e:
+        # If any error occurs, return empty list to fallback to mock generation
+        print(f"Error generating real positions: {e}")
+        return []
 
 def generate_mock_alerts(count: int = 5) -> List[Alert]:
     """Generate mock alerts."""
