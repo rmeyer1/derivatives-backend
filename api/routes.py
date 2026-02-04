@@ -317,6 +317,7 @@ async def get_dma_data():
     try:
         dma_data = fetch_dma_from_db()
         if dma_data:
+            logger.info(f"Returning {len(dma_data)} real DMA data points from database")
             return dma_data
         else:
             logger.info("No real DMA data found, falling back to mock data")
@@ -330,60 +331,39 @@ def fetch_dma_from_db() -> List[DMADataPoint]:
     """Fetch DMA (20-day moving average) from daily_prices."""
     try:
         with get_db() as db:
-            # Check if we're using Turso or SQLite
             is_turso = hasattr(db, 'execute')
+            prices = []
             
-            # Get data for a representative ticker (SPY as default)
+            # Get first available ticker from database (not hardcoded SPY)
             if is_turso:
-                prices = db.execute("""
-                    SELECT date, close 
-                    FROM daily_prices 
-                    WHERE ticker = 'SPY'
-                    ORDER BY date DESC 
-                    LIMIT 50
-                """)
-                # Reverse to chronological order
-                prices = list(reversed(prices))
+                ticker_rows = db.execute("SELECT DISTINCT ticker FROM daily_prices LIMIT 1")
+                if ticker_rows:
+                    ticker = ticker_rows[0]['ticker']
+                    logger.info(f"Using ticker '{ticker}' for DMA calculation")
+                    prices = db.execute("""
+                        SELECT date, close 
+                        FROM daily_prices 
+                        WHERE ticker = ?
+                        ORDER BY date DESC 
+                        LIMIT 50
+                    """, [ticker])
+                    prices = list(reversed(prices))
             else:
                 # For SQLite
                 cursor = db.cursor()
-                cursor.execute("""
-                    SELECT date, close 
-                    FROM daily_prices 
-                    WHERE ticker = 'SPY'
-                    ORDER BY date DESC 
-                    LIMIT 50
-                """)
-                # Reverse to chronological order
-                prices = [dict(row) for row in reversed(cursor.fetchall())]
-            
-            # If we don't have SPY data, try any ticker
-            if not prices:
-                if is_turso:
-                    ticker_rows = db.execute("SELECT DISTINCT ticker FROM daily_prices LIMIT 1")
-                    if ticker_rows:
-                        ticker = ticker_rows[0]['ticker']
-                        prices = db.execute("""
-                            SELECT date, close 
-                            FROM daily_prices 
-                            WHERE ticker = ?
-                            ORDER BY date DESC 
-                            LIMIT 50
-                        """, [ticker])
-                        prices = list(reversed(prices))
-                else:
-                    cursor.execute("SELECT DISTINCT ticker FROM daily_prices LIMIT 1")
-                    ticker_row = cursor.fetchone()
-                    if ticker_row:
-                        ticker = ticker_row[0]
-                        cursor.execute("""
-                            SELECT date, close 
-                            FROM daily_prices 
-                            WHERE ticker = ?
-                            ORDER BY date DESC 
-                            LIMIT 50
-                        """, (ticker,))
-                        prices = [dict(row) for row in reversed(cursor.fetchall())]
+                cursor.execute("SELECT DISTINCT ticker FROM daily_prices LIMIT 1")
+                ticker_row = cursor.fetchone()
+                if ticker_row:
+                    ticker = ticker_row[0]
+                    logger.info(f"Using ticker '{ticker}' for DMA calculation")
+                    cursor.execute("""
+                        SELECT date, close 
+                        FROM daily_prices 
+                        WHERE ticker = ?
+                        ORDER BY date DESC 
+                        LIMIT 50
+                    """, (ticker,))
+                    prices = [dict(row) for row in reversed(cursor.fetchall())]
             
             if not prices:
                 return []
@@ -428,10 +408,9 @@ def fetch_iv_from_db() -> List[IVDataPoint]:
     """Fetch IV data from iv_history table."""
     try:
         with get_db() as db:
-            # Check if we're using Turso or SQLite
             is_turso = hasattr(db, 'execute')
+            rows = []
             
-            # Get the most recent date with good data
             if is_turso:
                 # Find a date with substantial IV data
                 date_check = db.execute("""
@@ -439,18 +418,20 @@ def fetch_iv_from_db() -> List[IVDataPoint]:
                     FROM iv_history 
                     WHERE iv_30day IS NOT NULL 
                     GROUP BY date 
-                    HAVING COUNT(*) > 5
+                    HAVING COUNT(*) >= 3
                     ORDER BY date DESC 
                     LIMIT 1
                 """)
                 
                 if not date_check:
+                    logger.warning("No IV data found with sufficient coverage")
                     return []
                 
                 latest_date = date_check[0]['date']
+                logger.info(f"Using IV data from date: {latest_date}")
                 
                 rows = db.execute("""
-                    SELECT ticker, iv_30day 
+                    SELECT ticker, iv_30day, iv_52wk_high, iv_52wk_low
                     FROM iv_history 
                     WHERE date = ? AND iv_30day IS NOT NULL
                     ORDER BY ticker
@@ -462,7 +443,7 @@ def fetch_iv_from_db() -> List[IVDataPoint]:
                     FROM iv_history 
                     WHERE iv_30day IS NOT NULL 
                     GROUP BY date 
-                    HAVING COUNT(*) > 5
+                    HAVING COUNT(*) >= 3
                     ORDER BY date DESC 
                     LIMIT 1
                 """)
@@ -474,7 +455,7 @@ def fetch_iv_from_db() -> List[IVDataPoint]:
                 latest_date = date_row[0]
                 
                 cursor.execute("""
-                    SELECT ticker, iv_30day 
+                    SELECT ticker, iv_30day, iv_52wk_high, iv_52wk_low
                     FROM iv_history 
                     WHERE date = ? AND iv_30day IS NOT NULL
                     ORDER BY ticker
@@ -482,23 +463,29 @@ def fetch_iv_from_db() -> List[IVDataPoint]:
                 rows = [dict(row) for row in cursor.fetchall()]
             
             if not rows:
+                logger.warning("No IV rows found for the latest date")
                 return []
+            
+            logger.info(f"Found {len(rows)} IV records from database")
             
             # Transform to IVDataPoint objects
             iv_points = []
-            for i, row in enumerate(rows[:20]):  # Limit to 20 points
+            for i, row in enumerate(rows[:20]):
                 ticker = row['ticker']
                 iv_30 = row['iv_30day']
                 
                 if iv_30 is not None:
-                    # We'll create synthetic strikes based on ticker positions
-                    strike = float(80 + i * 5)  # Strikes from 80 to 175
+                    # Use ticker position for distinct strike values
+                    strike = float(100 + i * 10)
+                    iv_percent = iv_30  # Already stored as decimal (e.g., 0.35 = 35%)
                     
                     iv_points.append(IVDataPoint(
-                        strike=strike,
-                        iv=round(iv_30, 3)
+                        strike=round(strike, 0),
+                        iv=round(iv_percent, 3)
                     ))
+                    logger.debug(f"IV point: strike={strike}, iv={iv_percent}, ticker={ticker}")
             
+            logger.info(f"Returning {len(iv_points)} real IV data points")
             return iv_points
     
     except Exception as e:
