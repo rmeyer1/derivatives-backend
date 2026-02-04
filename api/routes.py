@@ -4,15 +4,19 @@ from fastapi import APIRouter, WebSocket
 from typing import List
 import json
 import asyncio
-import os
+import logging
 from datetime import datetime, timedelta
 
 from models import PortfolioItem, Alert, DMADataPoint, IVDataPoint, OptionType, Priority
 from services.data_generator import (
     generate_mock_positions, generate_mock_alerts, generate_dma_curve, generate_iv_curve
 )
-from services.database import get_db_connection, TursoClient
+from services.database import get_db
 from services.market_data import get_stock_price
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Create router
 router = APIRouter()
@@ -23,280 +27,453 @@ active_connections: List[WebSocket] = []
 
 @router.get("/positions", response_model=List[PortfolioItem])
 async def get_positions():
-    """Get portfolio positions from database or fallback to mock."""
-    positions = fetch_positions_from_db()
-    if positions:
-        return positions
-    # Fallback to mock with real prices
-    return generate_mock_positions()
+    """Get portfolio positions from database with fallback to mock data."""
+    try:
+        positions = fetch_positions_from_db()
+        if positions:
+            return positions
+        else:
+            logger.info("No real positions found, falling back to mock data")
+            return generate_mock_positions()
+    except Exception as e:
+        logger.error(f"Error fetching positions: {e}")
+        return generate_mock_positions()
 
 
 def fetch_positions_from_db() -> List[PortfolioItem]:
-    """Fetch positions from Turso database."""
+    """Fetch positions from database with proper error handling."""
     try:
-        conn = get_db_connection()
-        
-        # Get distinct tickers from daily_prices
-        if isinstance(conn, TursoClient):
-            rows = conn.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker")
-        else:
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker")
-            rows = cursor.fetchall()
-        
-        if not rows:
-            conn.close()
-            return []
-        
-        tickers = [row['ticker'] if isinstance(row, dict) else row[0] for row in rows]
-        positions = []
-        
-        for i, ticker in enumerate(tickers[:10]):  # Limit to 10 positions
-            # Get latest price
-            latest_price = get_stock_price(ticker)
-            if not latest_price:
-                latest_price = 100.0
+        with get_db() as db:
+            # Check if we're using Turso or SQLite
+            is_turso = hasattr(db, 'execute')
             
-            # Create synthetic positions for each ticker
-            for j, opt_type in enumerate([OptionType.CALL, OptionType.PUT]):
-                strike_offset = 0.05 if j == 0 else -0.05
-                strike = round(latest_price * (1 + strike_offset), 2)
-                expiration = (datetime.now() + timedelta(days=45)).strftime("%Y-%m-%d")
+            if is_turso:
+                # For Turso, we need to get distinct tickers first
+                ticker_result = db.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker")
+                tickers = [row['ticker'] for row in ticker_result]
+            else:
+                # For SQLite
+                cursor = db.cursor()
+                cursor.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker")
+                tickers = [row[0] for row in cursor.fetchall()]
+            
+            positions = []
+            for i, ticker in enumerate(tickers[:10]):  # Limit to 10 positions
+                if is_turso:
+                    # Get recent data for this ticker (last record)
+                    price_data = db.execute("""
+                        SELECT * FROM daily_prices 
+                        WHERE ticker = ? 
+                        ORDER BY date DESC 
+                        LIMIT 1
+                    """, [ticker])
+                    
+                    iv_data = db.execute("""
+                        SELECT * FROM iv_history 
+                        WHERE ticker = ? 
+                        ORDER BY date DESC 
+                        LIMIT 1
+                    """, [ticker])
+                    
+                    if not price_data:
+                        continue
+                        
+                    latest_price = price_data[0]
+                    latest_iv = iv_data[0] if iv_data else None
+                else:
+                    # For SQLite
+                    cursor = db.cursor()
+                    cursor.execute("""
+                        SELECT * FROM daily_prices 
+                        WHERE ticker = ? 
+                        ORDER BY date DESC 
+                        LIMIT 1
+                    """, (ticker,))
+                    price_row = cursor.fetchone()
+                    
+                    if not price_row:
+                        continue
+                    
+                    latest_price = dict(price_row)  # Convert Row to dict
+                    
+                    cursor.execute("""
+                        SELECT * FROM iv_history 
+                        WHERE ticker = ? 
+                        ORDER BY date DESC 
+                        LIMIT 1
+                    """, (ticker,))
+                    iv_row = cursor.fetchone()
+                    latest_iv = dict(iv_row) if iv_row else None
                 
-                # Greeks estimation
-                delta = 0.6 if opt_type == OptionType.CALL else -0.4
+                # Create portfolio item based on real data
+                close_price = latest_price['close']
+                open_price = latest_price['open']
                 
+                # Determine option type based on price movement
+                option_type = OptionType.CALL if close_price > open_price else OptionType.PUT
+                strike = round(close_price, 2)
+                expiration = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
+                quantity = 10
+                avg_price = round(strike * 0.95, 2)  # Slightly OTM assumption
+                market_price = round(strike, 2)
+                pnl = round((market_price - avg_price) * quantity, 2)
+                
+                # Use real IV if available, otherwise generate mock
+                iv = latest_iv['iv_30day'] if latest_iv and latest_iv.get('iv_30day') else 0.3
+                
+                # Simplified greeks
+                delta = 0.5 if option_type == OptionType.CALL else -0.5
+                gamma = 0.01
+                theta = -0.05
+                vega = 0.1
+
                 position = PortfolioItem(
-                    id=f"pos_{i}_{j}",
+                    id=f"pos_{i+1}",
                     symbol=ticker,
-                    type=opt_type,
+                    type=option_type,
                     strike=strike,
                     expiration=expiration,
-                    quantity=10,
-                    avgPrice=round(latest_price * 0.1, 2),
-                    marketPrice=round(latest_price * 0.12, 2),
-                    pnl=round(latest_price * 0.5, 2),
-                    iv=0.35,
-                    delta=round(delta, 2),
-                    gamma=0.05,
-                    theta=-0.02,
-                    vega=0.15
+                    quantity=quantity,
+                    avgPrice=avg_price,
+                    marketPrice=market_price,
+                    pnl=pnl,
+                    iv=iv,
+                    delta=delta,
+                    gamma=gamma,
+                    theta=theta,
+                    vega=vega
                 )
                 positions.append(position)
-        
-        conn.close()
-        return positions
+            
+            return positions
+    
     except Exception as e:
-        print(f"Error fetching positions from DB: {e}")
+        logger.error(f"Error fetching positions from database: {e}")
         return []
 
 
 @router.get("/alerts", response_model=List[Alert])
 async def get_alerts():
-    """Get alerts from database analysis or fallback to mock."""
-    alerts = fetch_alerts_from_db()
-    if alerts:
-        return alerts
-    return generate_mock_alerts()
+    """Generate alerts based on actual data from database with fallback to mock."""
+    try:
+        alerts = fetch_alerts_from_db()
+        if alerts:
+            return alerts
+        else:
+            logger.info("No real alerts generated, falling back to mock data")
+            return generate_mock_alerts()
+    except Exception as e:
+        logger.error(f"Error generating alerts: {e}")
+        return generate_mock_alerts()
 
 
 def fetch_alerts_from_db() -> List[Alert]:
     """Generate alerts based on database analysis."""
     try:
-        conn = get_db_connection()
-        alerts = []
-        
-        # Check for recent IV spikes
-        if isinstance(conn, TursoClient):
-            iv_rows = conn.execute("""
-                SELECT ticker, iv_30day, iv_52wk_high, iv_52wk_low 
-                FROM iv_history 
-                ORDER BY date DESC 
-                LIMIT 20
-            """)
-        else:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT ticker, iv_30day, iv_52wk_high, iv_52wk_low 
-                FROM iv_history 
-                ORDER BY date DESC 
-                LIMIT 20
-            """)
-            iv_rows = cursor.fetchall()
-        
-        for i, row in enumerate(iv_rows):
-            ticker = row['ticker'] if isinstance(row, dict) else row[0]
-            iv_30 = row.get('iv_30day') if isinstance(row, dict) else row[1]
-            iv_high = row.get('iv_52wk_high') if isinstance(row, dict) else row[2]
-            iv_low = row.get('iv_52wk_low') if isinstance(row, dict) else row[3]
+        with get_db() as db:
+            # Check if we're using Turso or SQLite
+            is_turso = hasattr(db, 'execute')
             
-            if iv_30 and iv_high and iv_30 > iv_high * 0.8:
-                alert = Alert(
-                    id=f"alert_iv_{i}",
-                    title=f"High IV Alert: {ticker}",
-                    description=f"{ticker} IV at {iv_30:.1%}, near 52wk high of {iv_high:.1%}",
-                    timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    priority=Priority.HIGH,
-                    read=False
-                )
-                alerts.append(alert)
-        
-        conn.close()
-        return alerts[:5]  # Limit to 5 alerts
+            alerts = []
+            
+            # Check for IV spikes (50% above 52-week low)
+            if is_turso:
+                iv_rows = db.execute("""
+                    SELECT ticker, date, iv_30day, iv_52wk_low
+                    FROM iv_history 
+                    WHERE iv_30day IS NOT NULL AND iv_52wk_low IS NOT NULL AND iv_52wk_low > 0
+                    ORDER BY date DESC 
+                    LIMIT 20
+                """)
+            else:
+                cursor = db.cursor()
+                cursor.execute("""
+                    SELECT ticker, date, iv_30day, iv_52wk_low
+                    FROM iv_history 
+                    WHERE iv_30day IS NOT NULL AND iv_52wk_low IS NOT NULL AND iv_52wk_low > 0
+                    ORDER BY date DESC 
+                    LIMIT 20
+                """)
+                iv_rows = [dict(row) for row in cursor.fetchall()]
+            
+            alert_id = 1
+            for row in iv_rows:
+                ticker = row['ticker']
+                iv_30day = row['iv_30day']
+                iv_52wk_low = row['iv_52wk_low']
+                
+                # Check for IV spike (>100% of 52-week low)
+                if iv_30day > iv_52wk_low * 2:
+                    alert = Alert(
+                        id=f"alert_iv_{alert_id}",
+                        title=f"IV Spike Detected: {ticker}",
+                        description=f"{ticker} implied volatility ({iv_30day:.2f}) is significantly above its 52-week low ({iv_52wk_low:.2f})",
+                        timestamp=row['date'],
+                        priority=Priority.HIGH,
+                        read=False
+                    )
+                    alerts.append(alert)
+                    alert_id += 1
+                    if alert_id > 3:  # Limit to 3 IV alerts
+                        break
+            
+            # Check for large price movements (>5% in a day)
+            if is_turso:
+                price_rows = db.execute("""
+                    SELECT ticker, date, open, close
+                    FROM daily_prices 
+                    WHERE open > 0 AND close > 0
+                    ORDER BY date DESC 
+                    LIMIT 50
+                """)
+            else:
+                cursor = db.cursor()
+                cursor.execute("""
+                    SELECT ticker, date, open, close
+                    FROM daily_prices 
+                    WHERE open > 0 AND close > 0
+                    ORDER BY date DESC 
+                    LIMIT 50
+                """)
+                price_rows = [dict(row) for row in cursor.fetchall()]
+            
+            # Group by ticker
+            ticker_prices = {}
+            for row in price_rows:
+                ticker = row['ticker']
+                if ticker not in ticker_prices:
+                    ticker_prices[ticker] = []
+                ticker_prices[ticker].append(row)
+            
+            # Check for large movements
+            for ticker, prices in ticker_prices.items():
+                if len(prices) < 2:
+                    continue
+                
+                # Check most recent day
+                latest = prices[0]
+                open_price = latest['open']
+                close_price = latest['close']
+                
+                if open_price > 0:
+                    pct_change = ((close_price - open_price) / open_price) * 100
+                    
+                    if abs(pct_change) > 5:  # 5% threshold
+                        priority = Priority.HIGH if abs(pct_change) > 10 else Priority.MEDIUM
+                        direction = "gained" if pct_change > 0 else "dropped"
+                        
+                        alert = Alert(
+                            id=f"alert_price_{alert_id}",
+                            title=f"Large Price Movement: {ticker}",
+                            description=f"{ticker} {direction} {abs(pct_change):.1f}% today",
+                            timestamp=latest['date'],
+                            priority=priority,
+                            read=False
+                        )
+                        alerts.append(alert)
+                        alert_id += 1
+                        if alert_id > 6:  # Limit total alerts
+                            break
+            
+            return alerts[:5]  # Return maximum of 5 alerts
+    
     except Exception as e:
-        print(f"Error fetching alerts from DB: {e}")
+        logger.error(f"Error fetching alerts from database: {e}")
         return []
 
 
 @router.get("/dma-data", response_model=List[DMADataPoint])
 async def get_dma_data():
-    """Get DMA curve data from database or fallback to mock."""
-    dma_data = fetch_dma_from_db()
-    if dma_data:
-        return dma_data
-    return generate_dma_curve()
+    """Fetch daily_prices from database, calculate DMA (20-day simple moving average)."""
+    try:
+        dma_data = fetch_dma_from_db()
+        if dma_data:
+            return dma_data
+        else:
+            logger.info("No real DMA data found, falling back to mock data")
+            return generate_dma_curve()
+    except Exception as e:
+        logger.error(f"Error calculating DMA: {e}")
+        return generate_dma_curve()
 
 
 def fetch_dma_from_db() -> List[DMADataPoint]:
     """Fetch DMA (20-day moving average) from daily_prices."""
     try:
-        conn = get_db_connection()
-        
-        # Get a popular ticker with data
-        if isinstance(conn, TursoClient):
-            ticker_rows = conn.execute("SELECT DISTINCT ticker FROM daily_prices LIMIT 1")
-            if not ticker_rows:
-                conn.close()
+        with get_db() as db:
+            # Check if we're using Turso or SQLite
+            is_turso = hasattr(db, 'execute')
+            
+            # Get data for a representative ticker (SPY as default)
+            if is_turso:
+                prices = db.execute("""
+                    SELECT date, close 
+                    FROM daily_prices 
+                    WHERE ticker = 'SPY'
+                    ORDER BY date DESC 
+                    LIMIT 50
+                """)
+                # Reverse to chronological order
+                prices = list(reversed(prices))
+            else:
+                # For SQLite
+                cursor = db.cursor()
+                cursor.execute("""
+                    SELECT date, close 
+                    FROM daily_prices 
+                    WHERE ticker = 'SPY'
+                    ORDER BY date DESC 
+                    LIMIT 50
+                """)
+                # Reverse to chronological order
+                prices = [dict(row) for row in reversed(cursor.fetchall())]
+            
+            # If we don't have SPY data, try any ticker
+            if not prices:
+                if is_turso:
+                    ticker_rows = db.execute("SELECT DISTINCT ticker FROM daily_prices LIMIT 1")
+                    if ticker_rows:
+                        ticker = ticker_rows[0]['ticker']
+                        prices = db.execute("""
+                            SELECT date, close 
+                            FROM daily_prices 
+                            WHERE ticker = ?
+                            ORDER BY date DESC 
+                            LIMIT 50
+                        """, [ticker])
+                        prices = list(reversed(prices))
+                else:
+                    cursor.execute("SELECT DISTINCT ticker FROM daily_prices LIMIT 1")
+                    ticker_row = cursor.fetchone()
+                    if ticker_row:
+                        ticker = ticker_row[0]
+                        cursor.execute("""
+                            SELECT date, close 
+                            FROM daily_prices 
+                            WHERE ticker = ?
+                            ORDER BY date DESC 
+                            LIMIT 50
+                        """, (ticker,))
+                        prices = [dict(row) for row in reversed(cursor.fetchall())]
+            
+            if not prices:
                 return []
-            ticker = ticker_rows[0].get('ticker') if isinstance(ticker_rows[0], dict) else ticker_rows[0][0]
             
-            # Get last 50 days of closing prices
-            rows = conn.execute("""
-                SELECT date, close 
-                FROM daily_prices 
-                WHERE ticker = ? 
-                ORDER BY date DESC 
-                LIMIT 50
-            """, [ticker])
-        else:
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT ticker FROM daily_prices LIMIT 1")
-            ticker_row = cursor.fetchone()
-            if not ticker_row:
-                conn.close()
-                return []
-            ticker = ticker_row[0]
+            # Calculate 20-day SMA
+            dma_data = []
+            window_size = 20
             
-            cursor.execute("""
-                SELECT date, close 
-                FROM daily_prices 
-                WHERE ticker = ? 
-                ORDER BY date DESC 
-                LIMIT 50
-            """, (ticker,))
-            rows = cursor.fetchall()
-        
-        if not rows:
-            conn.close()
-            return []
-        
-        # Reverse to chronological order
-        rows = list(reversed(rows))
-        
-        # Calculate 20-day moving average
-        dma_data = []
-        closes = [row['close'] if isinstance(row, dict) else row[1] for row in rows]
-        
-        for i, row in enumerate(rows):
-            if i < 19:  # Need 20 days for DMA
-                continue
+            for i in range(window_size - 1, len(prices)):
+                # Calculate SMA for the window ending at index i
+                window = prices[i - window_size + 1:i + 1]
+                sma = sum(p['close'] for p in window) / window_size
+                
+                dma_data.append(DMADataPoint(
+                    time=prices[i]['date'],
+                    value=round(sma, 2)
+                ))
             
-            date = row['date'] if isinstance(row, dict) else row[0]
-            dma_20 = sum(closes[i-19:i+1]) / 20
-            
-            dma_data.append(DMADataPoint(
-                time=date,
-                value=round(dma_20, 2)
-            ))
-        
-        conn.close()
-        return dma_data
+            return dma_data
+    
     except Exception as e:
-        print(f"Error fetching DMA from DB: {e}")
+        logger.error(f"Error calculating DMA from database: {e}")
         return []
 
 
 @router.get("/iv-data", response_model=List[IVDataPoint])
 async def get_iv_data():
-    """Get implied volatility curve data from database or fallback to mock."""
-    iv_data = fetch_iv_from_db()
-    if iv_data:
-        return iv_data
-    return generate_iv_curve()
+    """Fetch iv_history from database."""
+    try:
+        iv_data = fetch_iv_from_db()
+        if iv_data:
+            return iv_data
+        else:
+            logger.info("No real IV data found, falling back to mock data")
+            return generate_iv_curve()
+    except Exception as e:
+        logger.error(f"Error fetching IV data: {e}")
+        return generate_iv_curve()
 
 
 def fetch_iv_from_db() -> List[IVDataPoint]:
     """Fetch IV data from iv_history table."""
     try:
-        conn = get_db_connection()
-        
-        # Get latest IV data for available tickers
-        if isinstance(conn, TursoClient):
-            # Get the most recent date
-            date_rows = conn.execute("SELECT MAX(date) as max_date FROM iv_history")
-            if not date_rows:
-                conn.close()
+        with get_db() as db:
+            # Check if we're using Turso or SQLite
+            is_turso = hasattr(db, 'execute')
+            
+            # Get the most recent date with good data
+            if is_turso:
+                # Find a date with substantial IV data
+                date_check = db.execute("""
+                    SELECT date 
+                    FROM iv_history 
+                    WHERE iv_30day IS NOT NULL 
+                    GROUP BY date 
+                    HAVING COUNT(*) > 5
+                    ORDER BY date DESC 
+                    LIMIT 1
+                """)
+                
+                if not date_check:
+                    return []
+                
+                latest_date = date_check[0]['date']
+                
+                rows = db.execute("""
+                    SELECT ticker, iv_30day 
+                    FROM iv_history 
+                    WHERE date = ? AND iv_30day IS NOT NULL
+                    ORDER BY ticker
+                """, [latest_date])
+            else:
+                cursor = db.cursor()
+                cursor.execute("""
+                    SELECT date 
+                    FROM iv_history 
+                    WHERE iv_30day IS NOT NULL 
+                    GROUP BY date 
+                    HAVING COUNT(*) > 5
+                    ORDER BY date DESC 
+                    LIMIT 1
+                """)
+                date_row = cursor.fetchone()
+                
+                if not date_row:
+                    return []
+                
+                latest_date = date_row[0]
+                
+                cursor.execute("""
+                    SELECT ticker, iv_30day 
+                    FROM iv_history 
+                    WHERE date = ? AND iv_30day IS NOT NULL
+                    ORDER BY ticker
+                """, (latest_date,))
+                rows = [dict(row) for row in cursor.fetchall()]
+            
+            if not rows:
                 return []
-            latest_date = date_rows[0].get('max_date') if isinstance(date_rows[0], dict) else date_rows[0][0]
             
-            rows = conn.execute("""
-                SELECT ticker, iv_30day 
-                FROM iv_history 
-                WHERE date = ? AND iv_30day IS NOT NULL
-                ORDER BY ticker
-            """, [latest_date])
-        else:
-            cursor = conn.cursor()
-            cursor.execute("SELECT MAX(date) FROM iv_history")
-            latest_date = cursor.fetchone()[0]
-            if not latest_date:
-                conn.close()
-                return []
+            # Transform to IVDataPoint objects
+            iv_points = []
+            for i, row in enumerate(rows[:20]):  # Limit to 20 points
+                ticker = row['ticker']
+                iv_30 = row['iv_30day']
+                
+                if iv_30 is not None:
+                    # We'll create synthetic strikes based on ticker positions
+                    strike = float(80 + i * 5)  # Strikes from 80 to 175
+                    
+                    iv_points.append(IVDataPoint(
+                        strike=strike,
+                        iv=round(iv_30, 3)
+                    ))
             
-            cursor.execute("""
-                SELECT ticker, iv_30day 
-                FROM iv_history 
-                WHERE date = ? AND iv_30day IS NOT NULL
-                ORDER BY ticker
-            """, (latest_date,))
-            rows = cursor.fetchall()
-        
-        if not rows:
-            conn.close()
-            return []
-        
-        # Create IV curve points from ticker data
-        iv_data = []
-        base_strike = 50  # Synthetic strike scale
-        
-        for i, row in enumerate(rows):
-            ticker = row['ticker'] if isinstance(row, dict) else row[0]
-            iv_30 = row['iv_30day'] if isinstance(row, dict) else row[1]
-            if iv_30 is None:
-                continue
-            
-            # Create synthetic strike based on position
-            strike = base_strike + (i * 10)
-            
-            iv_data.append(IVDataPoint(
-                strike=strike,
-                iv=round(iv_30, 3)
-            ))
-        
-        conn.close()
-        return iv_data if iv_data else []
+            return iv_points
+    
     except Exception as e:
-        print(f"Error fetching IV from DB: {e}")
+        logger.error(f"Error fetching IV data from database: {e}")
         return []
 
 
@@ -311,7 +488,7 @@ async def websocket_endpoint(websocket: WebSocket):
             # Keep the connection alive
             await asyncio.sleep(30)
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}")
     finally:
         active_connections.remove(websocket)
 
@@ -322,5 +499,5 @@ async def broadcast_update(update_data: dict):
         try:
             await connection.send_text(json.dumps(update_data))
         except Exception as e:
-            print(f"Error sending WebSocket message: {e}")
+            logger.error(f"Error sending WebSocket message: {e}")
             active_connections.remove(connection)
