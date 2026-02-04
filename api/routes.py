@@ -25,15 +25,44 @@ router = APIRouter()
 active_connections: List[WebSocket] = []
 
 
+@router.get("/debug/tickers")
+async def get_debug_tickers():
+    """Debug endpoint to check what tickers are in the database."""
+    try:
+        with get_db() as db:
+            is_turso = hasattr(db, 'execute')
+            
+            if is_turso:
+                result = db.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker")
+                tickers = [row['ticker'] for row in result]
+                count_result = db.execute("SELECT COUNT(*) as count FROM daily_prices")
+                count = count_result[0]['count'] if count_result else 0
+            else:
+                cursor = db.cursor()
+                cursor.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker")
+                tickers = [row[0] for row in cursor.fetchall()]
+                cursor.execute("SELECT COUNT(*) FROM daily_prices")
+                count = cursor.fetchone()[0]
+            
+            return {
+                "tickers": tickers,
+                "total_rows": count,
+                "source": "turso" if is_turso else "sqlite"
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @router.get("/positions", response_model=List[PortfolioItem])
 async def get_positions():
     """Get portfolio positions from database with fallback to mock data."""
     try:
         positions = fetch_positions_from_db()
         if positions:
+            logger.info(f"Returning {len(positions)} real positions from database")
             return positions
         else:
-            logger.info("No real positions found, falling back to mock data")
+            logger.warning("No real positions found in database, falling back to mock data")
             return generate_mock_positions()
     except Exception as e:
         logger.error(f"Error fetching positions: {e}")
