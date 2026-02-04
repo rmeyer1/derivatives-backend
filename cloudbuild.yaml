@@ -1,0 +1,35 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/derivatives-backend:$COMMIT_SHA', '.']
+  
+  # Push the container image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/derivatives-backend:$COMMIT_SHA']
+  
+  # Deploy container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'derivatives-backend'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/derivatives-backend:$COMMIT_SHA'
+      - '--platform'
+      - 'managed'
+      - '--region'
+      - 'us-central1'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'TURSO_DATABASE_URL=${_TURSO_DATABASE_URL},TURSO_AUTH_TOKEN=${_TURSO_AUTH_TOKEN}'
+      - '--port'
+      - '8000'
+
+# Set environment variables that will be used in the deployment
+substitutions:
+  _TURSO_DATABASE_URL: ""
+  _TURSO_AUTH_TOKEN: ""
+
+images:
+  - 'gcr.io/$PROJECT_ID/derivatives-backend:$COMMIT_SHA'
