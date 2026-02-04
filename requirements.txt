@@ -7,4 +7,3 @@ pandas==2.0.3
 pydantic==2.5.0
 yfinance==0.2.18
 requests==2.31.0
-libsql-experimental==0.0.34
