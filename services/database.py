@@ -33,16 +33,31 @@ class TursoClient:
             'Content-Type': 'application/json'
         }
     
+    def _format_arg(self, arg) -> Dict:
+        """Format argument for Turso API with proper type."""
+        if arg is None:
+            return {"type": "null"}
+        elif isinstance(arg, bool):
+            return {"type": "integer", "value": "1" if arg else "0"}
+        elif isinstance(arg, int):
+            return {"type": "integer", "value": str(arg)}
+        elif isinstance(arg, float):
+            return {"type": "float", "value": str(arg)}
+        else:
+            return {"type": "text", "value": str(arg)}
+    
     def execute(self, sql: str, args: list = None) -> List[Dict]:
         """Execute SQL and return results via Turso HTTP API."""
-        # Turso v2/pipeline expects requests array with type: execute
+        # Format args with proper types for Turso
+        formatted_args = [self._format_arg(a) for a in (args or [])]
+        
         payload = {
             'requests': [
                 {
                     'type': 'execute',
                     'stmt': {
                         'sql': sql,
-                        'args': args or []
+                        'args': formatted_args
                     }
                 }
             ]
@@ -79,7 +94,6 @@ class TursoClient:
                             if isinstance(cell, dict) and 'value' in cell:
                                 row_dict[col_name] = cell['value']
                             elif isinstance(cell, dict) and 'type' in cell:
-                                # Turso may return {type: 'integer', value: '123'}
                                 row_dict[col_name] = cell.get('value')
                             else:
                                 row_dict[col_name] = cell
