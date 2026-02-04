@@ -512,7 +512,7 @@ async def get_dma_data_by_ticker():
 
 
 def fetch_dma_by_ticker() -> dict:
-    """Fetch 20-day DMA for each ticker in the database."""
+    """Fetch 50-day and 200-day DMA for each ticker in the database."""
     try:
         with get_db() as db:
             is_turso = hasattr(db, 'execute')
@@ -527,7 +527,8 @@ def fetch_dma_by_ticker() -> dict:
                 tickers = [row[0] for row in cursor.fetchall()]
             
             result = {}
-            window_size = 20
+            dma_50_window = 50
+            dma_200_window = 200
             
             for ticker in tickers:
                 if is_turso:
@@ -536,7 +537,7 @@ def fetch_dma_by_ticker() -> dict:
                         FROM daily_prices 
                         WHERE ticker = ?
                         ORDER BY date ASC 
-                        LIMIT 50
+                        LIMIT 250
                     """, [ticker])
                 else:
                     cursor.execute("""
@@ -544,28 +545,42 @@ def fetch_dma_by_ticker() -> dict:
                         FROM daily_prices 
                         WHERE ticker = ?
                         ORDER BY date ASC 
-                        LIMIT 50
+                        LIMIT 250
                     """, (ticker,))
                     prices = [dict(row) for row in cursor.fetchall()]
                 
-                if len(prices) < window_size:
+                # Need at least 200 days for full 200-day DMA
+                if len(prices) < dma_50_window:
                     continue
                 
-                # Calculate 20-day DMA
+                # Calculate 50-day and 200-day DMA
                 dma_data = []
-                for i in range(window_size - 1, len(prices)):
-                    window = prices[i - window_size + 1:i + 1]
-                    dma = sum(p['close'] for p in window) / window_size
-                    dma_data.append({
+                for i in range(len(prices)):
+                    point = {
                         "time": prices[i]['date'],
-                        "value": round(dma, 2),
                         "close": round(prices[i]['close'], 2)
-                    })
+                    }
+                    
+                    # 50-day DMA (if we have enough data)
+                    if i >= dma_50_window - 1:
+                        window_50 = prices[i - dma_50_window + 1:i + 1]
+                        dma_50 = sum(p['close'] for p in window_50) / dma_50_window
+                        point["dma_50"] = round(dma_50, 2)
+                    
+                    # 200-day DMA (if we have enough data)
+                    if i >= dma_200_window - 1:
+                        window_200 = prices[i - dma_200_window + 1:i + 1]
+                        dma_200 = sum(p['close'] for p in window_200) / dma_200_window
+                        point["dma_200"] = round(dma_200, 2)
+                    
+                    # Only include points that have at least the 50-day DMA
+                    if "dma_50" in point:
+                        dma_data.append(point)
                 
                 if dma_data:
                     result[ticker] = dma_data
             
-            logger.info(f"Returning DMA data for {len(result)} tickers")
+            logger.info(f"Returning 50/200-day DMA data for {len(result)} tickers")
             return result
     
     except Exception as e:
