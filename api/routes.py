@@ -1,6 +1,6 @@
 """API routes for the derivatives trading dashboard."""
 
-from fastapi import APIRouter, WebSocket
+from fastapi import APIRouter, WebSocket, Request
 from typing import List
 import json
 import asyncio
@@ -13,6 +13,7 @@ from services.data_generator import (
 )
 from services.database import get_db
 from services.market_data import get_stock_price
+from services.cache import cache
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -54,19 +55,35 @@ async def get_debug_tickers():
 
 
 @router.get("/positions", response_model=List[PortfolioItem])
-async def get_positions():
+async def get_positions(request: Request):
     """Get portfolio positions from database with fallback to mock data."""
+    # Check if nocache parameter is present
+    nocache = request.query_params.get("nocache") == "1"
+    
+    # Try to get from cache first
+    if not nocache:
+        cached_positions = cache.get("positions")
+        if cached_positions is not None:
+            logger.info("Returning positions from cache")
+            return cached_positions
+    
     try:
         positions = fetch_positions_from_db()
         if positions:
             logger.info(f"Returning {len(positions)} real positions from database")
+            # Cache the result for 5 minutes
+            cache.set("positions", positions, ttl_seconds=300)
             return positions
         else:
             logger.warning("No real positions found in database, falling back to mock data")
-            return generate_mock_positions()
+            mock_positions = generate_mock_positions()
+            cache.set("positions", mock_positions, ttl_seconds=300)
+            return mock_positions
     except Exception as e:
         logger.error(f"Error fetching positions: {e}")
-        return generate_mock_positions()
+        mock_positions = generate_mock_positions()
+        cache.set("positions", mock_positions, ttl_seconds=300)
+        return mock_positions
 
 
 def fetch_positions_from_db() -> List[PortfolioItem]:
@@ -182,18 +199,34 @@ def fetch_positions_from_db() -> List[PortfolioItem]:
 
 
 @router.get("/alerts", response_model=List[Alert])
-async def get_alerts():
+async def get_alerts(request: Request):
     """Generate alerts based on actual data from database with fallback to mock."""
+    # Check if nocache parameter is present
+    nocache = request.query_params.get("nocache") == "1"
+    
+    # Try to get from cache first
+    if not nocache:
+        cached_alerts = cache.get("alerts")
+        if cached_alerts is not None:
+            logger.info("Returning alerts from cache")
+            return cached_alerts
+    
     try:
         alerts = fetch_alerts_from_db()
         if alerts:
+            # Cache the result for 5 minutes
+            cache.set("alerts", alerts, ttl_seconds=300)
             return alerts
         else:
             logger.info("No real alerts generated, falling back to mock data")
-            return generate_mock_alerts()
+            mock_alerts = generate_mock_alerts()
+            cache.set("alerts", mock_alerts, ttl_seconds=300)
+            return mock_alerts
     except Exception as e:
         logger.error(f"Error generating alerts: {e}")
-        return generate_mock_alerts()
+        mock_alerts = generate_mock_alerts()
+        cache.set("alerts", mock_alerts, ttl_seconds=300)
+        return mock_alerts
 
 
 def fetch_alerts_from_db() -> List[Alert]:
@@ -319,19 +352,35 @@ def fetch_alerts_from_db() -> List[Alert]:
 
 
 @router.get("/dma-data", response_model=List[DMADataPoint])
-async def get_dma_data():
+async def get_dma_data(request: Request):
     """Fetch daily_prices from database, calculate DMA (20-day simple moving average)."""
+    # Check if nocache parameter is present
+    nocache = request.query_params.get("nocache") == "1"
+    
+    # Try to get from cache first
+    if not nocache:
+        cached_dma = cache.get("dma_data")
+        if cached_dma is not None:
+            logger.info("Returning DMA data from cache")
+            return cached_dma
+    
     try:
         dma_data = fetch_dma_from_db()
         if dma_data:
             logger.info(f"Returning {len(dma_data)} real DMA data points from database")
+            # Cache the result for 5 minutes
+            cache.set("dma_data", dma_data, ttl_seconds=300)
             return dma_data
         else:
             logger.info("No real DMA data found, falling back to mock data")
-            return generate_dma_curve()
+            mock_dma = generate_dma_curve()
+            cache.set("dma_data", mock_dma, ttl_seconds=300)
+            return mock_dma
     except Exception as e:
         logger.error(f"Error calculating DMA: {e}")
-        return generate_dma_curve()
+        mock_dma = generate_dma_curve()
+        cache.set("dma_data", mock_dma, ttl_seconds=300)
+        return mock_dma
 
 
 def fetch_dma_from_db() -> List[DMADataPoint]:
@@ -397,18 +446,34 @@ def fetch_dma_from_db() -> List[DMADataPoint]:
 
 
 @router.get("/iv-data", response_model=List[IVDataPoint])
-async def get_iv_data():
+async def get_iv_data(request: Request):
     """Fetch iv_history from database."""
+    # Check if nocache parameter is present
+    nocache = request.query_params.get("nocache") == "1"
+    
+    # Try to get from cache first
+    if not nocache:
+        cached_iv = cache.get("iv_data")
+        if cached_iv is not None:
+            logger.info("Returning IV data from cache")
+            return cached_iv
+    
     try:
         iv_data = fetch_iv_from_db()
         if iv_data:
+            # Cache the result for 5 minutes
+            cache.set("iv_data", iv_data, ttl_seconds=300)
             return iv_data
         else:
             logger.info("No real IV data found, falling back to mock data")
-            return generate_iv_curve()
+            mock_iv = generate_iv_curve()
+            cache.set("iv_data", mock_iv, ttl_seconds=300)
+            return mock_iv
     except Exception as e:
         logger.error(f"Error fetching IV data: {e}")
-        return generate_iv_curve()
+        mock_iv = generate_iv_curve()
+        cache.set("iv_data", mock_iv, ttl_seconds=300)
+        return mock_iv
 
 
 def fetch_iv_from_db() -> List[IVDataPoint]:
