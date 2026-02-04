@@ -205,40 +205,47 @@ def fetch_alerts_from_db() -> List[Alert]:
             
             alerts = []
             
-            # Check for IV spikes (50% above 52-week low)
+            # Check for IV spikes - join iv_history with iv_52wk_ranges
             if is_turso:
                 iv_rows = db.execute("""
-                    SELECT ticker, date, iv_30day, iv_52wk_low
-                    FROM iv_history 
-                    WHERE iv_30day IS NOT NULL AND iv_52wk_low IS NOT NULL AND iv_52wk_low > 0
-                    ORDER BY date DESC 
+                    SELECT h.ticker, h.date, h.atm_iv, r.low_52wk
+                    FROM iv_history h
+                    JOIN iv_52wk_ranges r ON h.ticker = r.ticker
+                    WHERE h.atm_iv IS NOT NULL AND r.low_52wk IS NOT NULL AND r.low_52wk > 0
+                    ORDER BY h.date DESC 
                     LIMIT 20
                 """)
             else:
                 cursor = db.cursor()
                 cursor.execute("""
-                    SELECT ticker, date, iv_30day, iv_52wk_low
-                    FROM iv_history 
-                    WHERE iv_30day IS NOT NULL AND iv_52wk_low IS NOT NULL AND iv_52wk_low > 0
-                    ORDER BY date DESC 
+                    SELECT h.ticker, h.date, h.atm_iv, r.low_52wk
+                    FROM iv_history h
+                    JOIN iv_52wk_ranges r ON h.ticker = r.ticker
+                    WHERE h.atm_iv IS NOT NULL AND r.low_52wk IS NOT NULL AND r.low_52wk > 0
+                    ORDER BY h.date DESC 
                     LIMIT 20
                 """)
                 iv_rows = [dict(row) for row in cursor.fetchall()]
             
             alert_id = 1
+            seen_tickers = set()
             for row in iv_rows:
                 ticker = row['ticker']
-                iv_30day = row['iv_30day']
-                iv_52wk_low = row['iv_52wk_low']
+                if ticker in seen_tickers:
+                    continue
+                seen_tickers.add(ticker)
                 
-                # Check for IV spike (>100% of 52-week low)
-                if iv_30day > iv_52wk_low * 2:
+                atm_iv = row['atm_iv']
+                low_52wk = row['low_52wk']
+                
+                # Check for IV spike (>80% of 52-week range from low)
+                if atm_iv > low_52wk * 1.8:
                     alert = Alert(
                         id=f"alert_iv_{alert_id}",
-                        title=f"IV Spike Detected: {ticker}",
-                        description=f"{ticker} implied volatility ({iv_30day:.2f}) is significantly above its 52-week low ({iv_52wk_low:.2f})",
+                        title=f"IV Elevated: {ticker}",
+                        description=f"{ticker} IV at {(atm_iv*100):.1f}%, near 52-week high",
                         timestamp=row['date'],
-                        priority=Priority.HIGH,
+                        priority=Priority.HIGH if atm_iv > low_52wk * 2 else Priority.MEDIUM,
                         read=False
                     )
                     alerts.append(alert)
@@ -405,45 +412,44 @@ async def get_iv_data():
 
 
 def fetch_iv_from_db() -> List[IVDataPoint]:
-    """Fetch IV data from iv_history table."""
+    """Fetch IV data from iv_history table using atm_iv column."""
     try:
         with get_db() as db:
             is_turso = hasattr(db, 'execute')
             rows = []
             
             if is_turso:
-                # Find a date with substantial IV data
+                # Find the latest date with IV data (any data, not requiring 3+ tickers)
                 date_check = db.execute("""
                     SELECT date 
                     FROM iv_history 
-                    WHERE iv_30day IS NOT NULL 
+                    WHERE atm_iv IS NOT NULL 
                     GROUP BY date 
-                    HAVING COUNT(*) >= 3
                     ORDER BY date DESC 
                     LIMIT 1
                 """)
                 
                 if not date_check:
-                    logger.warning("No IV data found with sufficient coverage")
+                    logger.warning("No IV data found in database")
                     return []
                 
                 latest_date = date_check[0]['date']
                 logger.info(f"Using IV data from date: {latest_date}")
                 
                 rows = db.execute("""
-                    SELECT ticker, iv_30day, iv_52wk_high, iv_52wk_low
-                    FROM iv_history 
-                    WHERE date = ? AND iv_30day IS NOT NULL
-                    ORDER BY ticker
+                    SELECT h.ticker, h.atm_iv, r.high_52wk, r.low_52wk
+                    FROM iv_history h
+                    LEFT JOIN iv_52wk_ranges r ON h.ticker = r.ticker
+                    WHERE h.date = ? AND h.atm_iv IS NOT NULL
+                    ORDER BY h.ticker
                 """, [latest_date])
             else:
                 cursor = db.cursor()
                 cursor.execute("""
                     SELECT date 
                     FROM iv_history 
-                    WHERE iv_30day IS NOT NULL 
+                    WHERE atm_iv IS NOT NULL 
                     GROUP BY date 
-                    HAVING COUNT(*) >= 3
                     ORDER BY date DESC 
                     LIMIT 1
                 """)
@@ -455,10 +461,11 @@ def fetch_iv_from_db() -> List[IVDataPoint]:
                 latest_date = date_row[0]
                 
                 cursor.execute("""
-                    SELECT ticker, iv_30day, iv_52wk_high, iv_52wk_low
-                    FROM iv_history 
-                    WHERE date = ? AND iv_30day IS NOT NULL
-                    ORDER BY ticker
+                    SELECT h.ticker, h.atm_iv, r.high_52wk, r.low_52wk
+                    FROM iv_history h
+                    LEFT JOIN iv_52wk_ranges r ON h.ticker = r.ticker
+                    WHERE h.date = ? AND h.atm_iv IS NOT NULL
+                    ORDER BY h.ticker
                 """, (latest_date,))
                 rows = [dict(row) for row in cursor.fetchall()]
             
@@ -472,18 +479,16 @@ def fetch_iv_from_db() -> List[IVDataPoint]:
             iv_points = []
             for i, row in enumerate(rows[:20]):
                 ticker = row['ticker']
-                iv_30 = row['iv_30day']
+                atm_iv = row['atm_iv']
                 
-                if iv_30 is not None:
+                if atm_iv is not None:
                     # Use ticker position for distinct strike values
                     strike = float(100 + i * 10)
-                    iv_percent = iv_30  # Already stored as decimal (e.g., 0.35 = 35%)
                     
                     iv_points.append(IVDataPoint(
                         strike=round(strike, 0),
-                        iv=round(iv_percent, 3)
+                        iv=round(atm_iv, 3)
                     ))
-                    logger.debug(f"IV point: strike={strike}, iv={iv_percent}, ticker={ticker}")
             
             logger.info(f"Returning {len(iv_points)} real IV data points")
             return iv_points
