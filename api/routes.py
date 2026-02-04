@@ -498,6 +498,159 @@ def fetch_iv_from_db() -> List[IVDataPoint]:
         return []
 
 
+@router.get("/dma-data-by-ticker")
+async def get_dma_data_by_ticker():
+    """Fetch DMA data for all tickers, grouped by ticker."""
+    try:
+        dma_by_ticker = fetch_dma_by_ticker()
+        if dma_by_ticker:
+            return {"tickers": dma_by_ticker}
+        return {"tickers": {}, "error": "No DMA data found"}
+    except Exception as e:
+        logger.error(f"Error fetching DMA by ticker: {e}")
+        return {"tickers": {}, "error": str(e)}
+
+
+def fetch_dma_by_ticker() -> dict:
+    """Fetch 20-day DMA for each ticker in the database."""
+    try:
+        with get_db() as db:
+            is_turso = hasattr(db, 'execute')
+            
+            # Get all tickers
+            if is_turso:
+                ticker_rows = db.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker")
+                tickers = [row['ticker'] for row in ticker_rows]
+            else:
+                cursor = db.cursor()
+                cursor.execute("SELECT DISTINCT ticker FROM daily_prices ORDER BY ticker")
+                tickers = [row[0] for row in cursor.fetchall()]
+            
+            result = {}
+            window_size = 20
+            
+            for ticker in tickers:
+                if is_turso:
+                    prices = db.execute("""
+                        SELECT date, close 
+                        FROM daily_prices 
+                        WHERE ticker = ?
+                        ORDER BY date ASC 
+                        LIMIT 50
+                    """, [ticker])
+                else:
+                    cursor.execute("""
+                        SELECT date, close 
+                        FROM daily_prices 
+                        WHERE ticker = ?
+                        ORDER BY date ASC 
+                        LIMIT 50
+                    """, (ticker,))
+                    prices = [dict(row) for row in cursor.fetchall()]
+                
+                if len(prices) < window_size:
+                    continue
+                
+                # Calculate 20-day DMA
+                dma_data = []
+                for i in range(window_size - 1, len(prices)):
+                    window = prices[i - window_size + 1:i + 1]
+                    dma = sum(p['close'] for p in window) / window_size
+                    dma_data.append({
+                        "time": prices[i]['date'],
+                        "value": round(dma, 2),
+                        "close": round(prices[i]['close'], 2)
+                    })
+                
+                if dma_data:
+                    result[ticker] = dma_data
+            
+            logger.info(f"Returning DMA data for {len(result)} tickers")
+            return result
+    
+    except Exception as e:
+        logger.error(f"Error calculating DMA by ticker: {e}")
+        return {}
+
+
+@router.get("/iv-data-by-ticker")
+async def get_iv_data_by_ticker():
+    """Fetch IV history for all tickers, grouped by ticker."""
+    try:
+        iv_by_ticker = fetch_iv_by_ticker()
+        if iv_by_ticker:
+            return {"tickers": iv_by_ticker}
+        return {"tickers": {}, "error": "No IV data found"}
+    except Exception as e:
+        logger.error(f"Error fetching IV by ticker: {e}")
+        return {"tickers": {}, "error": str(e)}
+
+
+def fetch_iv_by_ticker() -> dict:
+    """Fetch IV history for each ticker in the database."""
+    try:
+        with get_db() as db:
+            is_turso = hasattr(db, 'execute')
+            
+            # Get all tickers with IV data
+            if is_turso:
+                ticker_rows = db.execute("""
+                    SELECT DISTINCT ticker 
+                    FROM iv_history 
+                    WHERE atm_iv IS NOT NULL 
+                    ORDER BY ticker
+                """)
+                tickers = [row['ticker'] for row in ticker_rows]
+            else:
+                cursor = db.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT ticker 
+                    FROM iv_history 
+                    WHERE atm_iv IS NOT NULL 
+                    ORDER BY ticker
+                """)
+                tickers = [row[0] for row in cursor.fetchall()]
+            
+            result = {}
+            
+            for ticker in tickers:
+                if is_turso:
+                    rows = db.execute("""
+                        SELECT h.date, h.atm_iv, r.high_52wk, r.low_52wk
+                        FROM iv_history h
+                        LEFT JOIN iv_52wk_ranges r ON h.ticker = r.ticker
+                        WHERE h.ticker = ? AND h.atm_iv IS NOT NULL
+                        ORDER BY h.date ASC
+                    """, [ticker])
+                else:
+                    cursor.execute("""
+                        SELECT h.date, h.atm_iv, r.high_52wk, r.low_52wk
+                        FROM iv_history h
+                        LEFT JOIN iv_52wk_ranges r ON h.ticker = r.ticker
+                        WHERE h.ticker = ? AND h.atm_iv IS NOT NULL
+                        ORDER BY h.date ASC
+                    """, (ticker,))
+                    rows = [dict(row) for row in cursor.fetchall()]
+                
+                if rows:
+                    result[ticker] = [
+                        {
+                            "date": row['date'],
+                            "iv": round(row['atm_iv'], 3),
+                            "iv_52wk_high": row.get('high_52wk'),
+                            "iv_52wk_low": row.get('low_52wk')
+                        }
+                        for row in rows
+                    ]
+            
+            logger.info(f"Returning IV data for {len(result)} tickers")
+            return result
+    
+    except Exception as e:
+        logger.error(f"Error fetching IV by ticker: {e}")
+        return {}
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates."""
