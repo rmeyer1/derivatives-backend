@@ -1,9 +1,17 @@
 """Mock data generator for the derivatives trading dashboard."""
 
 import random
+import math
 from datetime import datetime, timedelta
 from typing import List
-import numpy as np
+
+# Try to import numpy, fallback to pure Python if not available
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+    np = None
 
 from models import PortfolioItem, Alert, DMADataPoint, IVDataPoint, OptionType, Priority
 from services.market_data import get_stock_price
