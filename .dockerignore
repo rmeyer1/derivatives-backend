@@ -1,12 +1,52 @@
-venv/
-.env
-.git
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
 .Python
+venv/
+env/
+ENV/
+.venv
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+briefing_logs/
+
+# Local data (don't include SQLite files)
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Test files
 .pytest_cache/
 .coverage
-.gitignore
-README.md
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files (these will be set in Cloud Run)
+.env
+.env.local
+.env.*.local
+
+# Migration scripts (only needed for local dev)
+export_to_turso.py
+import_to_turso.py
+migrate_to_turso.py
+turso_export.sql

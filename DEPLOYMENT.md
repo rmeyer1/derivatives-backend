@@ -1,71 +1,122 @@
-# Derivatives Backend Deployment Guide
+# Deployment Guide - Derivatives Backend
 
-This guide provides step-by-step instructions for deploying the derivatives backend API to Google Cloud Run.
+## Overview
+FastAPI backend deployed as a Docker container on Google Cloud Run.
 
 ## Prerequisites
-
-- Google Cloud SDK installed and configured
-- Docker installed
-- Access to a Turso database
+- Google Cloud account with billing enabled
+- gcloud CLI installed and authenticated
+- Docker installed (for local testing)
 
 ## Environment Variables
 
-Before deploying, ensure you have the following environment variables:
+Required for production:
 
-- `TURSO_DATABASE_URL` - URL for your Turso database
-- `TURSO_AUTH_TOKEN` - Authentication token for your Turso database
-- `CORS_ORIGINS` - Comma-separated list of allowed origins (e.g., your frontend domain)
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TURSO_DATABASE_URL` | Turso database URL | `libsql://market-data-rmeyer1.aws-us-east-1.turso.io` |
+| `TURSO_AUTH_TOKEN` | Turso API auth token | `eyJhbG...` |
+| `CORS_ORIGINS` | Allowed frontend origins | `https://derivatives-dashboard.vercel.app,http://localhost:3000` |
 
-## Deployment Methods
+## Local Docker Testing
 
-### Option 1: Google Cloud Build (Recommended)
+```bash
+# Build the image
+docker build -t derivatives-backend .
 
-1. Ensure your repository has the `cloudbuild.yaml` file
-2. Set up the required substitutions in Cloud Build:
-   - `_TURSO_DATABASE_URL`
-   - `_TURSO_AUTH_TOKEN`
-3. Trigger the build via:
-   ```
-   gcloud builds submit --config cloudbuild.yaml
-   ```
+# Run locally (with env vars)
+docker run -p 8000:8000 \
+  -e TURSO_DATABASE_URL="your-db-url" \
+  -e TURSO_AUTH_TOKEN="your-token" \
+  -e CORS_ORIGINS="http://localhost:3000" \
+  derivatives-backend
 
-### Option 2: Manual Docker Deployment
+# Test
+curl http://localhost:8000/health
+```
 
-1. Build the Docker image:
-   ```
-   docker build -t derivatives-backend .
-   ```
+## Deploy to Google Cloud Run
 
-2. Run locally for testing:
-   ```
-   docker run -p 8000:8000 \
-     -e TURSO_DATABASE_URL=your_database_url \
-     -e TURSO_AUTH_TOKEN=your_auth_token \
-     -e CORS_ORIGINS=your_frontend_domain \
-     derivatives-backend
-   ```
+### 1. Enable services and configure
+```bash
+# Set your project
+gcloud config set project YOUR_PROJECT_ID
 
-3. Tag and push to Google Container Registry:
-   ```
-   docker tag derivatives-backend gcr.io/your-project-id/derivatives-backend
-   docker push gcr.io/your-project-id/derivatives-backend
-   ```
+# Enable required APIs
+gcloud services enable run.googleapis.com
+gcloud services enable containerregistry.googleapis.com
+```
 
-4. Deploy to Cloud Run:
-   ```
-   gcloud run deploy derivatives-backend \
-     --image gcr.io/your-project-id/derivatives-backend \
-     --platform managed \
-     --region us-central1 \
-     --allow-unauthenticated \
-     --set-env-vars TURSO_DATABASE_URL=your_database_url,TURSO_AUTH_TOKEN=your_auth_token,CORS_ORIGINS=your_frontend_domain
-   ```
+### 2. Build and push to Google Container Registry
+```bash
+# Build with Cloud Build (recommended)
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/derivatives-backend
+
+# Or build locally and push
+docker build -t gcr.io/YOUR_PROJECT_ID/derivatives-backend .
+docker push gcr.io/YOUR_PROJECT_ID/derivatives-backend
+```
+
+### 3. Deploy to Cloud Run
+```bash
+gcloud run deploy derivatives-backend \
+  --image gcr.io/YOUR_PROJECT_ID/derivatives-backend \
+  --platform managed \
+  --region us-east1 \
+  --allow-unauthenticated \
+  --set-env-vars "TURSO_DATABASE_URL=libsql://market-data-rmeyer1.aws-us-east-1.turso.io" \
+  --set-env-vars "TURSO_AUTH_TOKEN=YOUR_TOKEN" \
+  --set-env-vars "CORS_ORIGINS=https://derivatives-dashboard.vercel.app" \
+  --memory 512Mi \
+  --cpu 1 \
+  --concurrency 80 \
+  --max-instances 10
+```
+
+### 4. Get the deployed URL
+```bash
+gcloud run services describe derivatives-backend --region us-east1 --format 'value(status.url)'
+# Example output: https://derivatives-backend-xyz123-ue.a.run.app
+```
 
 ## API Endpoints
 
-Once deployed, your API will be accessible at:
-- Base URL: `https://your-service-url.a.run.app`
-- Health check: `GET /`
-- API routes: Defined in `api/routes.py`
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | Health check |
+| `GET /positions` | Portfolio positions |
+| `GET /alerts` | IV spike alerts |
+| `GET /dma-data` | Aggregate DMA data |
+| `GET /dma-data-by-ticker` | Per-ticker DMA (50/200 day) |
+| `GET /iv-data` | IV curve data |
+| `GET /iv-data-by-ticker` | Per-ticker IV history |
+| `GET /debug/tickers` | Database diagnostic |
 
-Replace `your-service-url` with the actual URL provided by Cloud Run after deployment.
+## Updating the Deployment
+
+```bash
+# Rebuild and redeploy
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/derivatives-backend
+gcloud run deploy derivatives-backend \
+  --image gcr.io/YOUR_PROJECT_ID/derivatives-backend \
+  --region us-east1
+```
+
+## Monitoring
+
+- Cloud Run Console: https://console.cloud.google.com/run
+- Logs: `gcloud logging read "resource.type=cloud_run_revision"`
+
+## Cost Optimization
+
+Cloud Run scales to zero when not in use. Typical costs:
+- Free tier: 2M requests/month, 360K GB-seconds compute
+- Beyond free: ~$0.0000025/request + compute time
+
+## Troubleshooting
+
+**CORS errors**: Update `CORS_ORIGINS` env var with your actual Vercel domain
+
+**Database connection fails**: Check `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`
+
+**Container won't start**: Check logs with `gcloud run logs read`
