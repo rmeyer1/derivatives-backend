@@ -34,28 +34,57 @@ class TursoClient:
         }
     
     def execute(self, sql: str, args: list = None) -> List[Dict]:
-        """Execute SQL and return results."""
-        payload = {'statements': [{'sql': sql, 'args': args or []}]}
+        """Execute SQL and return results via Turso HTTP API."""
+        # Turso v2/pipeline expects requests array with type: execute
+        payload = {
+            'requests': [
+                {
+                    'type': 'execute',
+                    'stmt': {
+                        'sql': sql,
+                        'args': args or []
+                    }
+                }
+            ]
+        }
+        
         response = requests.post(
             f'{self.url}/v2/pipeline',
             headers=self.headers,
             json=payload,
             timeout=30
         )
-        response.raise_for_status()
+        
+        if response.status_code != 200:
+            logger.error(f"Turso API error: {response.status_code} - {response.text[:200]}")
+            response.raise_for_status()
+        
         data = response.json()
         
-        # Parse results
+        # Parse results from pipeline response
         results = []
-        for result in data.get('results', []):
-            if 'response' in result and 'result' in result['response']:
-                rows = result['response']['result'].get('rows', [])
-                cols = result['response']['result'].get('cols', [])
-                for row in rows:
-                    row_dict = {}
-                    for i, col in enumerate(cols):
-                        row_dict[col['name']] = row[i].get('value') if isinstance(row[i], dict) else row[i]
-                    results.append(row_dict)
+        if 'results' in data:
+            for result in data['results']:
+                if 'response' in result and 'result' in result['response']:
+                    result_data = result['response']['result']
+                    rows = result_data.get('rows', [])
+                    cols = result_data.get('cols', [])
+                    
+                    for row in rows:
+                        row_dict = {}
+                        for i, col in enumerate(cols):
+                            col_name = col['name'] if isinstance(col, dict) else col
+                            cell = row[i] if i < len(row) else None
+                            # Handle Turso's value wrapper format
+                            if isinstance(cell, dict) and 'value' in cell:
+                                row_dict[col_name] = cell['value']
+                            elif isinstance(cell, dict) and 'type' in cell:
+                                # Turso may return {type: 'integer', value: '123'}
+                                row_dict[col_name] = cell.get('value')
+                            else:
+                                row_dict[col_name] = cell
+                        results.append(row_dict)
+        
         return results
     
     def commit(self):
