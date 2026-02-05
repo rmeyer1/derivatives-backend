@@ -601,18 +601,19 @@ def fetch_dma_by_ticker() -> dict:
                         SELECT date, close 
                         FROM daily_prices 
                         WHERE ticker = ?
-                        ORDER BY date ASC 
+                        ORDER BY date DESC 
                         LIMIT 250
                     """, [ticker])
+                    prices = list(reversed(prices))
                 else:
                     cursor.execute("""
                         SELECT date, close 
                         FROM daily_prices 
                         WHERE ticker = ?
-                        ORDER BY date ASC 
+                        ORDER BY date DESC 
                         LIMIT 250
                     """, (ticker,))
-                    prices = [dict(row) for row in cursor.fetchall()]
+                    prices = [dict(row) for row in reversed(cursor.fetchall())]
                 
                 # Need at least 200 days for full 200-day DMA
                 if len(prices) < dma_50_window:
@@ -700,17 +701,20 @@ def fetch_iv_by_ticker() -> dict:
                         FROM iv_history h
                         LEFT JOIN iv_52wk_ranges r ON h.ticker = r.ticker
                         WHERE h.ticker = ? AND h.atm_iv IS NOT NULL
-                        ORDER BY h.date ASC
+                        ORDER BY h.date DESC
+                        LIMIT 365
                     """, [ticker])
+                    rows = list(reversed(rows))
                 else:
                     cursor.execute("""
                         SELECT h.date, h.atm_iv, r.high_52wk, r.low_52wk
                         FROM iv_history h
                         LEFT JOIN iv_52wk_ranges r ON h.ticker = r.ticker
                         WHERE h.ticker = ? AND h.atm_iv IS NOT NULL
-                        ORDER BY h.date ASC
+                        ORDER BY h.date DESC
+                        LIMIT 365
                     """, (ticker,))
-                    rows = [dict(row) for row in cursor.fetchall()]
+                    rows = [dict(row) for row in reversed(cursor.fetchall())]
                 
                 if rows:
                     result[ticker] = [
