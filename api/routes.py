@@ -7,13 +7,15 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from models import PortfolioItem, Alert, DMADataPoint, IVDataPoint, OptionType, Priority
+from models import PortfolioItem, Alert, DMADataPoint, IVDataPoint, OptionType, Priority, CreatePositionRequest
 from services.data_generator import (
     generate_mock_positions, generate_mock_alerts, generate_dma_curve, generate_iv_curve
 )
 from services.database import get_db
 from services.market_data import get_stock_price
 from services.cache import cache
+import uuid
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -745,6 +747,102 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}")
     finally:
         active_connections.remove(websocket)
+
+
+@router.post("/positions")
+async def create_position(position: CreatePositionRequest):
+    """Create a new position."""
+    try:
+        position_id = str(uuid.uuid4())
+        created_at = datetime.now().isoformat()
+        updated_at = created_at
+        
+        with get_db() as db:
+            is_turso = hasattr(db, 'execute')
+            
+            if is_turso:
+                db.execute("""
+                    INSERT INTO positions (id, symbol, type, strike, expiration, quantity, avg_price, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, [position_id, position.symbol, position.type.value, position.strike, position.expiration, position.quantity, position.avg_price, created_at, updated_at])
+            else:
+                cursor = db.cursor()
+                cursor.execute("""
+                    INSERT INTO positions (id, symbol, type, strike, expiration, quantity, avg_price, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (position_id, position.symbol, position.type.value, position.strike, position.expiration, position.quantity, position.avg_price, created_at, updated_at))
+                db.commit()
+        
+        return {
+            "id": position_id,
+            "symbol": position.symbol,
+            "type": position.type,
+            "strike": position.strike,
+            "expiration": position.expiration,
+            "quantity": position.quantity,
+            "avg_price": position.avg_price,
+            "created_at": created_at,
+            "updated_at": updated_at
+        }
+    except Exception as e:
+        logger.error(f"Error creating position: {e}")
+        return {"error": str(e)}, 500
+
+
+@router.delete("/positions/{position_id}")
+async def delete_position(position_id: str):
+    """Delete a position by ID."""
+    try:
+        with get_db() as db:
+            is_turso = hasattr(db, 'execute')
+            
+            if is_turso:
+                result = db.execute("DELETE FROM positions WHERE id = ?", [position_id])
+                if not result:
+                    return {"error": "Position not found"}, 404
+            else:
+                cursor = db.cursor()
+                cursor.execute("DELETE FROM positions WHERE id = ?", (position_id,))
+                db.commit()
+                if cursor.rowcount == 0:
+                    return {"error": "Position not found"}, 404
+        
+        return {"message": "Position deleted successfully"}
+    except Exception as e:
+        logger.error(f"Error deleting position: {e}")
+        return {"error": str(e)}, 500
+
+
+@router.get("/positions", response_model=List[PortfolioItem])
+async def get_positions(request: Request):
+    """Get portfolio positions from database with fallback to mock data."""
+    # Check if nocache parameter is present
+    nocache = request.query_params.get("nocache") == "1"
+    
+    # Try to get from cache first
+    if not nocache:
+        cached_positions = cache.get("positions")
+        if cached_positions is not None:
+            logger.info("Returning positions from cache")
+            return cached_positions
+    
+    try:
+        positions = fetch_positions_from_db()
+        if positions:
+            logger.info(f"Returning {len(positions)} real positions from database")
+            # Cache the result for 5 minutes
+            cache.set("positions", positions, ttl_seconds=300)
+            return positions
+        else:
+            logger.warning("No real positions found in database, falling back to mock data")
+            mock_positions = generate_mock_positions()
+            cache.set("positions", mock_positions, ttl_seconds=300)
+            return mock_positions
+    except Exception as e:
+        logger.error(f"Error fetching positions: {e}")
+        mock_positions = generate_mock_positions()
+        cache.set("positions", mock_positions, ttl_seconds=300)
+        return mock_positions
 
 
 async def broadcast_update(update_data: dict):
