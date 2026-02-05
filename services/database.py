@@ -182,6 +182,17 @@ def initialize_database():
                 iv_52wk_high REAL,
                 iv_52wk_low REAL,
                 PRIMARY KEY (ticker, date)
+            )''',
+            '''CREATE TABLE IF NOT EXISTS positions (
+                id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                type TEXT NOT NULL,
+                strike REAL NOT NULL,
+                expiration TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                avg_price REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )'''
         ]
         for sql in create_statements:
@@ -211,6 +222,19 @@ def initialize_database():
                 iv_52wk_high REAL,
                 iv_52wk_low REAL,
                 PRIMARY KEY (ticker, date)
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS positions (
+                id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                type TEXT NOT NULL,
+                strike REAL NOT NULL,
+                expiration TEXT NOT NULL,
+                quantity INTEGER NOT NULL,
+                avg_price REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         ''')
         conn.commit()

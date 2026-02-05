@@ -50,3 +50,12 @@ class DMADataPoint(BaseModel):
 class IVDataPoint(BaseModel):
     strike: float
     iv: float
+
+
+class CreatePositionRequest(BaseModel):
+    symbol: str
+    type: OptionType
+    strike: float
+    expiration: str
+    quantity: int
+    avg_price: float
